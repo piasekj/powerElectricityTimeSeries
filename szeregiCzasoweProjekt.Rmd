@@ -53,18 +53,20 @@ kaggle <- import("kaggle")
 system("mkdir data/")
 
 kaggle$api$dataset_download_files(
-  dataset = "russellyates88/suicide-rates-overview-1985-to-2016",
+  dataset = "l3llff/wind-power",
   path = "data/",
   unzip = TRUE
 )
 
-system("mv data/master.csv data/suicide-rates.csv")
+system("mv data/data.csv data/wind-power.csv")
 
 kaggle$api$dataset_download_files(
-  dataset = "sahirmaharajj/school-student-daily-attendance",
+  dataset = "ccanb23/iea-monthly-electricity-statistics",
   path = "data/",
   unzip = TRUE
 )
+
+system("mv data/data.csv data/iea-monthly-electricity-statistics.csv")
 
 detach("package:reticulate", unload=TRUE)
 ```
