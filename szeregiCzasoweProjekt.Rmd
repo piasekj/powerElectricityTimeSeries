@@ -1,0 +1,132 @@
+---
+title: "szeregiCzasoweProjekt"
+author: "Jakub Piasek"
+date: "2025-06-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Working directory automation
+pwd <- system("pwd", TRUE)
+setwd(pwd)
+```
+
+
+```{r, echo=FALSE}
+# Libraries
+library(dotenv)
+library(kaggler)
+library(lubridate)
+library(tidyverse)
+library(ggthemes)
+library(rio)
+library(xts)
+library(hrbrthemes)
+library(viridis)
+library(lubridate)
+library(reshape2)
+library(RColorBrewer)
+library(expsmooth)
+library(forecast)
+library(pracma)
+library(flextable)
+```
+
+
+
+```{r}
+library(reticulate)
+
+# Kaggle API setup and datasets download
+load_dot_env(".env")
+kgl_auth_file_setup(KAGGLE_API_KEY)
+
+reticulate::install_python(version = "3.12.3")
+virtualenv_create("r-kaggle-env", python = "/usr/bin/python3")
+virtualenv_install("r-kaggle-env", packages = "kaggle", ignore_installed = TRUE)
+use_virtualenv("r-kaggle-env", required = TRUE)
+
+kaggle <- import("kaggle")
+
+system("mkdir data/")
+
+kaggle$api$dataset_download_files(
+  dataset = "russellyates88/suicide-rates-overview-1985-to-2016",
+  path = "data/",
+  unzip = TRUE
+)
+
+system("mv data/master.csv data/suicide-rates.csv")
+
+kaggle$api$dataset_download_files(
+  dataset = "sahirmaharajj/school-student-daily-attendance",
+  path = "data/",
+  unzip = TRUE
+)
+
+detach("package:reticulate", unload=TRUE)
+```
+
+
+```{r}
+# SUICIDE RATES
+ 
+suicidesDf <- import("data/suicide-rates.csv")
+
+# Data processing
+suicidesYearly <- suicidesDf %>%
+  group_by(year) %>%
+  summarise(
+    total_suicides = sum(suicides_no, na.rm = TRUE),
+    total_population = sum(population, na.rm = TRUE),
+    suicide_rate_per_100k = total_suicides / total_population * 100000
+  ) %>%
+  filter(row_number() <= n() -1) # Removing the last row, so it won't disturb the data (because there is less data for this year)
+
+# Converting the dataset into annual time series
+suicidesYearlyTs <- ts(suicidesYearly$total_suicides,
+                 start = c(min(suicidesYearly$year)),
+                 frequency = 1)
+```
+
+
+```{r}
+# SCHOOL STUDENT DAILY ATTENDANCE
+
+attendanceDf <- import("data/2018-2019_Daily_Attendance_20240429.csv")
+
+# Data processing
+attendanceDaily <- attendanceDf %>%
+  mutate(Date = ymd(as.character(Date))) %>%
+  group_by(Date) %>%
+  summarise(
+    Enrolled = sum(Enrolled, na.rm = TRUE),
+    Absent = sum(Absent, na.rm = TRUE),
+    Present = sum(Present, na.rm = TRUE),
+    Released = sum(Released, na.rm = TRUE)
+  ) %>%
+  mutate(
+    Year = year(Date),
+    Month = month(Date),
+    Day = day(Date)
+  ) %>%
+  arrange(Date)
+
+# Convering the dataset into daily time series
+attendanceDailyTs <- ts(attendanceDaily$Present,
+                 start = c(2018, 1),
+                 frequency = 365)
+```
+
+
+
+```{r}
+
+# przyda się na potem
+ts_data <- ts(attendanceDaily$Present, frequency = 5)
+stl_data <- stl(ts_data, s.window = "periodic")
+plot(stl_data)
+
+```
