@@ -1,0 +1,1830 @@
+---
+title: "szeregiCzasoweProjekt"
+author: "Jakub Piasek"
+date: "2025-06-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Working directory automation
+pwd <- system("pwd", TRUE)
+setwd(pwd)
+```
+
+
+```{r, echo=FALSE}
+# Libraries
+library(dotenv)
+library(kaggler)
+library(lubridate)
+library(tidyverse)
+library(ggthemes)
+library(grid)
+library(rio)
+library(xts)
+library(hrbrthemes)
+library(viridis)
+library(lubridate)
+library(reshape2)
+library(RColorBrewer)
+library(expsmooth)
+library(forecast)
+library(pracma)
+library(kableExtra)
+```
+
+
+# Kaggle API setup and datasets download
+
+```{r}
+library(reticulate)
+
+load_dot_env(".env")
+kgl_auth_file_setup(KAGGLE_API_KEY)
+
+reticulate::install_python(version = "3.12.3")
+virtualenv_create("r-kaggle-env", python = "/usr/bin/python3")
+virtualenv_install("r-kaggle-env", packages = "kaggle", ignore_installed = TRUE)
+use_virtualenv("r-kaggle-env", required = TRUE)
+
+kaggle <- import("kaggle")
+
+system("mkdir data/")
+
+kaggle$api$dataset_download_files(
+  dataset = "l3llff/wind-power",
+  path = "data/",
+  unzip = TRUE
+)
+
+system("mv data/data.csv data/wind-power.csv")
+
+kaggle$api$dataset_download_files(
+  dataset = "ccanb23/iea-monthly-electricity-statistics",
+  path = "data/",
+  unzip = TRUE
+)
+
+system("mv data/data.csv data/iea-monthly-electricity-statistics.csv")
+
+detach("package:reticulate", unload=TRUE)
+```
+
+# Datasets import, data processing and conversion into time series
+
+```{r}
+# WIND POWER
+
+windPowerDf <- import("data/wind-power.csv")
+
+# Data processing
+windPowerMonthly <- windPowerDf %>%
+  mutate(parsed_dt = ymd_hms(dt, quiet = TRUE)) %>%
+  filter(!is.na(parsed_dt)) %>%
+  mutate(
+    month = floor_date(parsed_dt, "month"),
+    year = year(parsed_dt),
+    month_num = month(parsed_dt)
+  ) %>%
+  group_by(month, year, month_num) %>%
+  summarise(monthly_avg_MW = mean(MW, na.rm = TRUE), .groups = "drop") %>%
+  mutate(month = as.Date(month))
+
+# Converting the data frame into monthly time series
+windPowerMonthlyTs <- ts(windPowerMonthly$monthly_avg_MW,
+                 start = c(2011, 1),
+                 frequency = 12)
+```
+
+
+
+```{r}
+# ELECTRICITY
+
+electricityDf <- import("data/iea-monthly-electricity-statistics.csv")
+
+# Data processing
+electricityMonthly <- electricityDf %>%
+  filter(!is.na(VALUE)) %>%
+  mutate(
+    date = make_date(YEAR, MONTH, 1),
+    year = YEAR,
+    month = MONTH
+  ) %>%
+  group_by(date, year, month) %>%
+  summarise(mean_MWh = mean(VALUE, na.rm = TRUE), .groups = "drop")
+
+# Converting the data frame into monthly time series
+electricityMonthlyTs <- ts(electricityMonthly$mean_MWh,
+                 start = c(2010, 1),
+                 frequency = 12)
+```
+
+
+# Raw data table vizualization
+
+```{r}
+# Wind power
+windPowerDf %>%
+  head(20) %>%
+  kable(format = "html",
+        caption = "Dane dotyczące mocy wiatru",
+        col.names = c("Data", "Moc [MW]"),
+        align = "c") %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(0,
+           background = "steelblue",
+           color = "white",
+           bold = TRUE,
+           align = "center") %>%
+  column_spec(1,
+              width = "200px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2,
+              width = "120px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+# Electricity
+electricityDf %>%
+  head(20) %>%
+  kable(
+    format = "html",
+    caption = "Dane dotyczące produkcji energii elektrycznej",
+    col.names = c(
+      "Kraj", "Kod", "Data", "Rok", "Miesiąc", "Nazwa miesiąca",
+      "Produkt", "Wartość", "Kolejność", "YTD",
+      "YTD poprzedni rok", "Udział [%]"
+    ),
+    align = "c"
+  ) %>%
+  kable_styling(
+    full_width = TRUE,  # <<< TABELA zajmuje całą szerokość renderowaną
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1,  width = "10%", extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2,  width = "6%",  extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(3,  width = "8%",  extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(4,  width = "5%",  extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(5,  width = "5%",  extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(6,  width = "10%", extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(7,  width = "12%", extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(8,  width = "8%",  extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(9,  width = "8%",  extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(10, width = "6%",  extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(11, width = "10%", extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(12, width = "6%",  extra_css = "text-align: center; white-space: nowrap;")
+```
+
+
+# Processed data tables visualisation
+
+```{r}
+# Wind power
+
+windPowerMonthly %>%
+  head(20) %>%
+  kable(
+    format = "html",
+    caption = "Średnia miesięczna moc wiatru - po przetworzeniu",
+    col.names = c("Data", "Rok", "Miesiąc", "Średnia moc [MW]"),
+    align = "c",
+    digits = 2
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "130px", border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2, width = "80px", border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(3, width = "90px", border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(4, width = "150px", border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+# Electricity
+electricityMonthly %>%
+  head(20) %>%
+  kable(
+    format = "html",
+    caption = "Średnia miesięczna produkcja energii elektrycznej - po przetworzeniu",
+    col.names = c("Data", "Rok", "Miesiąc", "Średnia [MWh]"),
+    align = "c",
+    digits = 2
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "120px", border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2, width = "80px", border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(3, width = "80px", border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(4, width = "130px", border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+```
+
+# Raw time series visalisation
+
+```{r}
+# Wind power
+
+# Convert time series to matrix
+windPowerMatrix <- matrix(
+  data = as.numeric(windPowerMonthlyTs),
+  ncol = 12,
+  byrow = TRUE
+)
+
+# Set month names in Polish
+colnames(windPowerMatrix) <- c(
+  "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+  "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"
+)
+
+# Set years as row names
+rownames(windPowerMatrix) <- as.character(
+  floor(time(windPowerMonthlyTs)[seq(1, length(windPowerMonthlyTs), by = 12)])
+)
+
+# Convert to tibble with "Rok" column
+windPowerTable <- as_tibble(windPowerMatrix, rownames = "Rok")
+
+# Visualize using kableExtra with grid lines
+windPowerTable %>%
+  kable(
+    format = "html",
+    caption = "Moc wiatru - wartości miesięczne jako szereg czasowy",
+    align = "c",
+    digits = 2
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "80px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:12, width = "85px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(13, width = "85px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+# Electricity
+
+# Convert time series to matrix
+electricityMatrix <- matrix(
+  data = as.numeric(electricityMonthlyTs),
+  ncol = 12,
+  byrow = TRUE
+)
+
+# Set month names in Polish
+colnames(electricityMatrix) <- c(
+  "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+  "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"
+)
+
+# Set years as row names
+rownames(electricityMatrix) <- as.character(
+  floor(time(electricityMonthlyTs)[seq(1, length(electricityMonthlyTs), by = 12)])
+)
+
+# Convert to tibble with "Rok" column
+electricityTable <- as_tibble(electricityMatrix, rownames = "Rok")
+
+# Visualize using kableExtra with grid lines
+electricityTable %>%
+  kable(
+    format = "html",
+    caption = "Produkcja energii elektrycznej – wartości miesięczne jako szereg czasowy",
+    align = "c",
+    digits = 2
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "80px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:12, width = "85px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(13, width = "85px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+```
+
+
+# Basic time series visualisation
+
+```{r}
+# Wind power plot
+plot1 <- ggplot(windPowerMonthly, aes(x = month, y = monthly_avg_MW)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  labs(
+    title = "Średnia miesięczna moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]"
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6)
+  ) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+
+# Export the wind power plot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot1.png",
+  plot = plot1,
+  width = 12, height = 6, dpi = 300
+)
+
+
+
+# Electricity plot
+plot2 <- ggplot(electricityMonthly, aes(x = date, y = mean_MWh)) +
+  geom_line(color = "#c74444", linewidth = 1) +
+  labs(
+    title = "Średnia miesięczna produkcja energii elektrycznej",
+    x = "Czas",
+    y = "Produkcja [MWh]"
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6)
+  ) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y")
+
+# Export the electricity plot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot2.png",
+  plot = plot2,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+```
+
+
+# Time series visualised as a vectors
+
+```{r}
+# Wind power scatterplot
+plot3 <- ggplot(tibble(
+  index = seq_along(windPowerMonthlyTs),
+  value = as.vector(windPowerMonthlyTs)
+), aes(x = index, y = value)) +
+  geom_point(shape = 1, color = "steelblue") +
+  labs(
+    title = "Średnia miesięczna moc wiatrowa (jako wektor)",
+    x = "",
+    y = ""
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6)
+  )
+
+# Export the wind power scatterplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot3.png",
+  plot = plot3,
+  width = 12, height = 6, dpi = 300
+)
+
+# Electricity scatterplot
+plot4 <- ggplot(tibble(
+  index = seq_along(electricityMonthlyTs),
+  value = as.vector(electricityMonthlyTs)
+), aes(x = index, y = value)) +
+  geom_point(shape = 1, color = "#c74444") +
+  labs(
+    title = "Średnia miesięczna produkcja energii elektrycznej (jako wektor)",
+    x = "",
+    y = ""
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6)
+  )
+
+# Export the electricity scatterplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot4.png",
+  plot = plot4,
+  width = 12, height = 6, dpi = 300
+)
+```
+
+
+# Numeric time series statistics
+
+```{r}
+# Wind power
+# Vector of data recording times
+
+# Extract and reshape the time values
+windPowerTimeMatrix <- matrix(
+  data = time(windPowerMonthlyTs),
+  ncol = 12,
+  byrow = TRUE
+)
+
+# Assign Polish month names
+colnames(windPowerTimeMatrix) <- c(
+  "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+  "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"
+)
+
+# Assign years as row names
+rownames(windPowerTimeMatrix) <- as.character(
+  floor(time(windPowerMonthlyTs)[seq(1, length(windPowerMonthlyTs), by = 12)])
+)
+
+# Convert to tibble with "Rok" column
+windPowerTimeTable <- as_tibble(windPowerTimeMatrix, rownames = "Rok")
+
+# Format with kableExtra
+windPowerTimeTable %>%
+  kable(
+    format = "html",
+    caption = "Wartości time() dla szeregu czasowego – moc wiatru",
+    align = "c",
+    digits = 3
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "80px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:12, width = "85px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(13, width = "85px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+
+# Observation position in the cycle
+
+# Extract and reshape the cycle values
+windPowerCycleMatrix <- matrix(
+  data = cycle(windPowerMonthlyTs),
+  ncol = 12,
+  byrow = TRUE
+)
+
+# Assign Polish month names
+colnames(windPowerCycleMatrix) <- c(
+  "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+  "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"
+)
+
+# Assign years as row names
+rownames(windPowerCycleMatrix) <- as.character(
+  floor(time(windPowerMonthlyTs)[seq(1, length(windPowerMonthlyTs), by = 12)])
+)
+
+# Convert to tibble with "Rok" column
+windPowerCycleTable <- as_tibble(windPowerCycleMatrix, rownames = "Rok")
+
+# Format with kableExtra
+windPowerCycleTable %>%
+  kable(
+    format = "html",
+    caption = "Wartości cycle() dla szeregu czasowego – moc wiatru",
+    align = "c"
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "80px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:12, width = "85px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(13, width = "85px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+
+# Wind power time series stats
+windPowerTsNumberStats <- tibble(
+  `Częstotliwość szeregu` = frequency(windPowerMonthlyTs),
+  `Odstęp czasowy między obserwacjami` = deltat(windPowerMonthlyTs),
+  `Data początku szeregu` = tsp(windPowerMonthlyTs)[1],
+  `Data końca szeregu` = tsp(windPowerMonthlyTs)[2]
+)
+
+
+windPowerTsNumberStats %>%
+  kable(
+    format = "html",
+    caption = "Statystyki szeregu czasowego – moc wiatru",
+    align = "c",
+    digits = 3
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "200px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:3, width = "200px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(4, width = "200px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+# Electricity
+
+
+# Vector of data recording times
+
+# reshape time() output into matrix
+electricityTimeMatrix <- matrix(
+  data = time(electricityMonthlyTs),
+  ncol = 12,
+  byrow = TRUE
+)
+
+# assign Polish month names as column names
+colnames(electricityTimeMatrix) <- c(
+  "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+  "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"
+)
+
+# assign years as row names
+rownames(electricityTimeMatrix) <- as.character(
+  floor(time(electricityMonthlyTs)[seq(1, length(electricityMonthlyTs), by = 12)])
+)
+
+# convert to tibble with "Rok" column
+electricityTimeTable <- as_tibble(electricityTimeMatrix, rownames = "Rok")
+
+# render with kableExtra
+electricityTimeTable %>%
+  kable(
+    format = "html",
+    caption = "Wartości time() dla szeregu czasowego - produkcja energii",
+    align = "c",
+    digits = 3
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "80px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:12, width = "85px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(13, width = "85px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+
+# Observation position in the cycle
+
+# reshape cycle() output into matrix
+electricityCycleMatrix <- matrix(
+  data = cycle(electricityMonthlyTs),
+  ncol = 12,
+  byrow = TRUE
+)
+
+# assign Polish month names as column names
+colnames(electricityCycleMatrix) <- c(
+  "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+  "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień"
+)
+
+# assign years as row names
+rownames(electricityCycleMatrix) <- as.character(
+  floor(time(electricityMonthlyTs)[seq(1, length(electricityMonthlyTs), by = 12)])
+)
+
+# convert to tibble with "Rok" column
+electricityCycleTable <- as_tibble(electricityCycleMatrix, rownames = "Rok")
+
+# render with kableExtra
+electricityCycleTable %>%
+  kable(
+    format = "html",
+    caption = "Wartości cycle() dla szeregu czasowego – produkcja energii",
+    align = "c"
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "80px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:12, width = "85px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(13, width = "85px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+
+# Electricity time series stats
+electricityTsNumberStats <- tibble(
+  `Częstotliwość szeregu` = frequency(electricityMonthlyTs),
+  `Odstęp czasowy między obserwacjami` = deltat(electricityMonthlyTs),
+  `Data początku szeregu` = tsp(electricityMonthlyTs)[1],
+  `Data końca szeregu` = tsp(electricityMonthlyTs)[2]
+)
+
+electricityTsNumberStats %>%
+  kable(
+    format = "html",
+    caption = "Statystyki szeregu czasowego – produkcja energii",
+    align = "c",
+    digits = 3
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+    position = "center"
+  ) %>%
+  row_spec(
+    0,
+    background = "steelblue",
+    color = "white",
+    bold = TRUE,
+    align = "center"
+  ) %>%
+  column_spec(1, width = "200px",
+              border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(2:3, width = "200px",
+              border_left = TRUE, border_right = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;") %>%
+  column_spec(4, width = "200px",
+              border_left = TRUE,
+              extra_css = "text-align: center; white-space: nowrap;")
+
+
+```
+
+
+# Monthplots
+
+```{r, echo = FALSE}
+# Wind power time series monthplot
+png("sprawozdanie/img/plot5.png", width = 1200, height = 800, res = 150)
+monthplot(windPowerMonthlyTs,
+          main = "Monthplot miesięcznej mocy wiatru",
+          xlab = "Miesiąc",
+          ylab = "Średnia moc [MW]",
+          lty = 1,
+          lwd = 2)
+dev.off()
+
+# Electricity time series monthplot
+png("sprawozdanie/img/plot6.png", width = 1200, height = 800, res = 150)
+monthplot(electricityMonthlyTs,
+          main = "Monthplot miesięcznej produkcji energii",
+          xlab = "Miesiąc",
+          ylab = "Średnia moc [MW]",
+          lty = 1,
+          lwd = 2)
+dev.off()
+```
+
+
+# Boxplots
+
+```{r}
+# Wind power boxplot
+windPowerBoxplotDf <- tibble(
+  wartość = as.numeric(windPowerMonthlyTs),
+  miesiąc = cycle(windPowerMonthlyTs)
+) %>%
+  mutate(
+    miesiąc = factor(
+      c("Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+        "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień")[miesiąc],
+      levels = c("Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+                 "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień")
+    )
+  )
+
+plot7 <- ggplot(windPowerBoxplotDf, aes(x = miesiąc, y = wartość)) +
+  geom_boxplot(fill = "steelblue", color = "black", outlier.color = "darkblue") +
+  labs(
+    title = "Rozkład miesięcznej mocy wiatrowej (boxplot)",
+    x = "Miesiąc",
+    y = "Moc [MW]"
+  ) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the wind power boxplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot7.png",
+  plot = plot7,
+  width = 12, height = 6, dpi = 300
+)
+
+
+# Electricity boxplot
+electricityBoxplotDf <- tibble(
+  wartość = as.numeric(electricityMonthlyTs),
+  miesiąc = cycle(electricityMonthlyTs)
+) %>%
+  mutate(
+    miesiąc = factor(
+      c("Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+        "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień")[miesiąc],
+      levels = c("Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",
+                 "Lipiec", "Sierpień", "Wrzesień", "Październik", "Listopad", "Grudzień")
+    )
+  )
+
+plot8 <- ggplot(electricityBoxplotDf, aes(x = miesiąc, y = wartość)) +
+  geom_boxplot(fill = "#c74444", color = "black", outlier.color = "darkred") +
+  labs(
+    title = "Rozkład miesięcznej produkcji energii (boxplot)",
+    x = "Miesiąc",
+    y = "Produkcja [MWh]"
+  ) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the electricity boxplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot8.png",
+  plot = plot8,
+  width = 12, height = 6, dpi = 300
+)
+```
+
+
+# Seasonplots
+
+```{r}
+# Wind power seasonplot
+windPowerSeasonplotDf <- tibble(
+  wartość = as.numeric(windPowerMonthlyTs),
+  miesiąc = cycle(windPowerMonthlyTs),
+  rok = floor(time(windPowerMonthlyTs))
+) %>%
+  mutate(
+    miesiąc = factor(miesiąc,
+                     levels = 1:12,
+                     labels = c("Sty", "Lut", "Mar", "Kwi", "Maj", "Cze",
+                                "Lip", "Sie", "Wrz", "Paź", "Lis", "Gru"))
+  )
+
+plot9 <- ggplot(windPowerSeasonplotDf, aes(x = miesiąc, y = wartość, group = rok, color = factor(rok))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Seasonplot miesięcznej mocy wiatrowej",
+    x = "Miesiąc",
+    y = "Moc [MW]",
+    color = "Rok"
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+# Export the wind power seasonplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot9.png",
+  plot = plot9,
+  width = 12, height = 6, dpi = 300
+)
+
+
+# Electricity seasonplot
+electricitySeasonplotDf <- tibble(
+  wartość = as.numeric(electricityMonthlyTs),
+  miesiąc = cycle(electricityMonthlyTs),
+  rok = floor(time(electricityMonthlyTs))
+) %>%
+  mutate(
+    miesiąc = factor(miesiąc,
+                     levels = 1:12,
+                     labels = c("Sty", "Lut", "Mar", "Kwi", "Maj", "Cze",
+                                "Lip", "Sie", "Wrz", "Paź", "Lis", "Gru"))
+  )
+
+plot10 <- ggplot(electricitySeasonplotDf, aes(x = miesiąc, y = wartość, group = rok, color = factor(rok))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Seasonplot miesięcznej produkcji energii",
+    x = "Miesiąc",
+    y = "Produkcja [MWh]",
+    color = "Rok"
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+
+# Export the electricity seasonplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot10.png",
+  plot = plot10,
+  width = 12, height = 6, dpi = 300
+)
+```
+
+
+# Lagplots
+
+```{r, echo=FALSE}
+# Wind power lagplot
+png("sprawozdanie/img/plot11.png", width = 1200, height = 1200, res = 150)
+lag.plot(windPowerMonthlyTs,
+         lags = 12,
+         main = "Lag plot dla miesięcznej mocy wiatru",
+         diag.col = "blue")
+dev.off()
+
+# Electricity lagplot
+png("sprawozdanie/img/plot12.png", width = 1200, height = 1200, res = 150)
+lag.plot(electricityMonthlyTs,
+         lags = 12,
+         main = "Lag plot dla miesięcznej produkcji energii",
+         diag.col = "blue")
+dev.off()
+```
+
+
+# ACF
+
+```{r, echo=FALSE}
+# Wind power ACF
+png("sprawozdanie/img/plot13.png", width = 1600, height = 800, res = 150)
+acf(windPowerMonthlyTs,
+    lag.max = 36,
+    main = "ACF dla miesięcznej mocy wiatru")
+dev.off()
+
+# Electricity ACF
+png("sprawozdanie/img/plot14.png", width = 1600, height = 800, res = 150)
+acf(electricityMonthlyTs,
+    lag.max = 36,
+    main = "ACF dla miesięcznej produkcji energii")
+dev.off()
+```
+
+
+# PACF
+
+```{r, echo=FALSE}
+# Wind power PACF
+png("sprawozdanie/img/plot15.png", width = 1600, height = 800, res = 150)
+pacf(windPowerMonthlyTs,
+    lag.max = 36,
+    main = "PACF dla miesięcznej mocy wiatru")
+dev.off()
+
+# Electricity PACF
+png("sprawozdanie/img/plot16.png", width = 1600, height = 800, res = 150)
+pacf(electricityMonthlyTs,
+    lag.max = 36,
+    main = "PACF dla miesięcznej produkcji energii")
+dev.off()
+```
+
+
+# Panelplots
+
+```{r}
+# Wind power panelplot (with Polish month labels)
+windPowerPanelDf <- tibble(
+  wartość = as.numeric(windPowerMonthlyTs),
+  data = seq.Date(from = as.Date("2011-01-01"), by = "month", length.out = length(windPowerMonthlyTs)),
+  rok = factor(year(data))
+)
+
+plot17 <- ggplot(windPowerPanelDf, aes(x = data, y = wartość)) +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  facet_wrap(~ rok, ncol = 1, scales = "free_x") +
+  labs(
+    title = "Miesięczna moc wiatrowa – panel lat",
+    x = "Data",
+    y = "Moc [MW]"
+  ) +
+  scale_x_date(
+    date_breaks = "1 month",
+    labels = function(x) {
+      polskie_miesiące <- c("Sty", "Lut", "Mar", "Kwi", "Maj", "Cze",
+                            "Lip", "Sie", "Wrz", "Paź", "Lis", "Gru")
+      paste0(polskie_miesiące[month(x)], " ", year(x))
+    }
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6),
+    axis.text.y = element_text(size = 8),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10)
+  )
+
+# Export the wind power panelplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot17.png",
+  plot = plot17,
+  width = 14, height = 16, dpi = 400
+)
+
+
+# Electricity panelplot (with Polish month labels)
+electricityPanelDf <- tibble(
+  wartość = as.numeric(electricityMonthlyTs),
+  data = seq.Date(from = as.Date("2010-01-01"), by = "month", length.out = length(electricityMonthlyTs)),
+  rok = factor(year(data))
+)
+
+plot18 <- ggplot(electricityPanelDf, aes(x = data, y = wartość)) +
+  geom_line(color = "#c74444", linewidth = 0.8) +
+  facet_wrap(~ rok, ncol = 1, scales = "free_x") +
+  labs(
+    title = "Miesięczna produkcja energii – panel lat",
+    x = "Data",
+    y = "Produkcja [MWh]"
+  ) +
+  scale_x_date(
+    date_breaks = "1 month",
+    labels = function(x) {
+      polskie_miesiące <- c("Sty", "Lut", "Mar", "Kwi", "Maj", "Cze",
+                            "Lip", "Sie", "Wrz", "Paź", "Lis", "Gru")
+      paste0(polskie_miesiące[month(x)], " ", year(x))
+    }
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6),
+    axis.text.y = element_text(size = 8),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10)
+  )
+
+# Export the electricity panelplot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot18.png",
+  plot = plot18,
+  width = 14, height = 16, dpi = 400
+)
+```
+
+
+# Decomposition
+## Additive
+
+```{r, echo=FALSE}
+# Wind power additive decomposition
+png("sprawozdanie/img/plot19.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+
+decompAdd <- decompose(windPowerMonthlyTs, type = "additive")
+plot(decompAdd)
+title(main = "Dekompozycja addytywna - Moc wiatru",
+      outer = TRUE, line = 1, cex.main = 1.2)
+dev.off()
+
+# Electricity additive decomposition
+png("sprawozdanie/img/plot20.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+
+decompAdd <- decompose(electricityMonthlyTs, type = "additive")
+plot(decompAdd)
+title(main = "Dekompozycja addytywna - Produkcja energii",
+      outer = TRUE, line = 1, cex.main = 1.2)
+dev.off()
+```
+
+
+
+## Multiplicative
+
+```{r, echo=FALSE}
+# Wind power multiplicative decomposition
+png("sprawozdanie/img/plot21.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+
+decompAdd <- decompose(windPowerMonthlyTs, type = "multiplicative")
+plot(decompAdd)
+title(main = "Dekompozycja multiplikatywna - Moc wiatru",
+      outer = TRUE, line = 1, cex.main = 1.2)
+dev.off()
+
+# Electricity additive decomposition
+png("sprawozdanie/img/plot22.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+
+decompAdd <- decompose(electricityMonthlyTs, type = "multiplicative")
+plot(decompAdd)
+title(main = "Dekompozycja multiplikatywna - Produkcja energii",
+      outer = TRUE, line = 1, cex.main = 1.2)
+dev.off()
+```
+
+
+## Moving average
+
+```{r}
+# Wind power decomposition plot
+windPowerDecompDf <- tibble(
+  czas = seq.Date(from = as.Date("2011-01-01"), by = "month", length.out = length(windPowerMonthlyTs)),
+  oryginalny = as.numeric(windPowerMonthlyTs)
+)
+
+windPowerDecompDf <- windPowerDecompDf %>%
+  mutate(
+    trend = as.numeric(stats::filter(oryginalny, filter = rep(1/12, 12), sides = 2)),
+    sezonowy = oryginalny - trend,
+    miesiąc = cycle(windPowerMonthlyTs),
+    sezon_sredni = as.numeric(tapply(sezonowy, miesiąc, mean, na.rm = TRUE)[miesiąc]),
+    reszty = as.numeric(oryginalny - trend - sezon_sredni)
+  )
+
+windPowerDecompLong <- windPowerDecompDf %>%
+  select(czas, oryginalny, trend, sezon_sredni, reszty) %>%
+  pivot_longer(-czas, names_to = "składnik", values_to = "wartość")
+
+plot23 <- ggplot(windPowerDecompLong, aes(x = czas, y = wartość, color = składnik, linetype = składnik)) +
+  geom_line() +
+  scale_color_manual(values = c("oryginalny" = "black", "trend" = "blue",
+                                "sezon_sredni" = "#3a9c55", "reszty" = "darkred")) +
+  scale_linetype_manual(values = c("oryginalny" = "solid", "trend" = "dashed",
+                                   "sezon_sredni" = "dotdash", "reszty" = "twodash")) +
+  labs(
+    title = "Dekompozycja z ruchomą średnią – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]",
+    color = "Składnik",
+    linetype = "Składnik"
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6)
+  )
+
+# Export the wind power decomposition plot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot23.png",
+  plot = plot23,
+  width = 14, height = 6, dpi = 400
+)
+
+
+# Electricity decomposition plot
+electricityDecompDf <- tibble(
+  czas = seq.Date(from = as.Date("2010-01-01"), by = "month", length.out = length(electricityMonthlyTs)),
+  oryginalny = as.numeric(electricityMonthlyTs)
+)
+
+electricityDecompDf <- electricityDecompDf %>%
+  mutate(
+    trend = as.numeric(stats::filter(oryginalny, filter = rep(1/12, 12), sides = 2)),
+    sezonowy = oryginalny - trend,
+    miesiąc = cycle(electricityMonthlyTs),
+    sezon_sredni = as.numeric(tapply(sezonowy, miesiąc, mean, na.rm = TRUE)[miesiąc]),
+    reszty = as.numeric(oryginalny - trend - sezon_sredni)
+  )
+
+electricityDecompLong <- electricityDecompDf %>%
+  select(czas, oryginalny, trend, sezon_sredni, reszty) %>%
+  pivot_longer(-czas, names_to = "składnik", values_to = "wartość")
+
+plot24 <- ggplot(electricityDecompLong, aes(x = czas, y = wartość, color = składnik, linetype = składnik)) +
+  geom_line() +
+  scale_color_manual(values = c("oryginalny" = "black", "trend" = "blue",
+                                "sezon_sredni" = "#3a9c55", "reszty" = "darkred")) +
+  scale_linetype_manual(values = c("oryginalny" = "solid", "trend" = "dashed",
+                                   "sezon_sredni" = "dotdash", "reszty" = "twodash")) +
+  labs(
+    title = "Dekompozycja z ruchomą średnią – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]",
+    color = "Składnik",
+    linetype = "Składnik"
+  ) +
+  theme_economist() +
+  theme(
+    axis.line.y = element_line(color = "black", linewidth = 0.6)
+  )
+
+# Export the electricity decomposition plot to a file
+ggsave(
+  filename = "sprawozdanie/img/plot24.png",
+  plot = plot24,
+  width = 14, height = 6, dpi = 400
+)
+```
+
+
+## Decomposition using regression model
+
+```{r}
+# Wind power regression decomposition plot
+windPowerRegDf <- tibble(
+  data = seq.Date(from = as.Date("2011-01-01"), by = "month", length.out = length(windPowerMonthlyTs)),
+  wartość = as.numeric(windPowerMonthlyTs)
+) %>%
+  mutate(
+    czas_idx = 1:n(),
+    miesiąc = factor(month(data))
+  )
+
+model_wind <- lm(wartość ~ czas_idx + miesiąc, data = windPowerRegDf)
+windPowerRegDf$fitted <- fitted(model_wind)
+
+trend_wind <- lm(wartość ~ czas_idx, data = windPowerRegDf)
+windPowerRegDf$trend <- fitted(trend_wind)
+
+windPowerRegDf <- windPowerRegDf %>%
+  mutate(
+    sezonowość = fitted - trend,
+    reszty = wartość - fitted
+  )
+
+windPowerRegLong <- windPowerRegDf %>%
+  select(data, wartość, trend, sezonowość, reszty) %>%
+  rename(oryginalny = wartość) %>%
+  pivot_longer(-data, names_to = "składnik", values_to = "wartość")
+
+plot25 <- ggplot(windPowerRegLong, aes(x = data, y = wartość, color = składnik)) +
+  geom_line() +
+  facet_wrap(~ składnik, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Dekompozycja regresyjna – moc wiatrowa",
+    x = "Data",
+    y = "Moc [MW]"
+  ) +
+  scale_color_manual(values = c("oryginalny" = "black", "trend" = "blue",
+                                "sezonowość" = "darkgreen", "reszty" = "darkred")) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the wind power regression decomposition plot
+ggsave(
+  filename = "sprawozdanie/img/plot25.png",
+  plot = plot25,
+  width = 14, height = 8, dpi = 400
+)
+
+
+# Electricity regression decomposition plot
+electricityRegDf <- tibble(
+  data = seq.Date(from = as.Date("2010-01-01"), by = "month", length.out = length(electricityMonthlyTs)),
+  wartość = as.numeric(electricityMonthlyTs)
+) %>%
+  mutate(
+    czas_idx = 1:n(),
+    miesiąc = factor(month(data))
+  )
+
+model_elec <- lm(wartość ~ czas_idx + miesiąc, data = electricityRegDf)
+electricityRegDf$fitted <- fitted(model_elec)
+
+trend_elec <- lm(wartość ~ czas_idx, data = electricityRegDf)
+electricityRegDf$trend <- fitted(trend_elec)
+
+electricityRegDf <- electricityRegDf %>%
+  mutate(
+    sezonowość = fitted - trend,
+    reszty = wartość - fitted
+  )
+
+electricityRegLong <- electricityRegDf %>%
+  select(data, wartość, trend, sezonowość, reszty) %>%
+  rename(oryginalny = wartość) %>%
+  pivot_longer(-data, names_to = "składnik", values_to = "wartość")
+
+plot26 <- ggplot(electricityRegLong, aes(x = data, y = wartość, color = składnik)) +
+  geom_line() +
+  facet_wrap(~ składnik, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Dekompozycja regresyjna – produkcja energii",
+    x = "Data",
+    y = "Produkcja [MWh]"
+  ) +
+  scale_color_manual(values = c("oryginalny" = "black", "trend" = "blue",
+                                "sezonowość" = "darkgreen", "reszty" = "darkred")) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the electricity regression decomposition plot
+ggsave(
+  filename = "sprawozdanie/img/plot26.png",
+  plot = plot26,
+  width = 14, height = 8, dpi = 400
+)
+```
+
+
+# Deseasonalization
+
+```{r}
+# Wind power – deseasonalized
+windPowerDecompAdd <- decompose(windPowerMonthlyTs, type = "additive")
+windPowerDeseasonalized <- windPowerMonthlyTs - windPowerDecompAdd$seasonal
+
+windPowerDeseasonDf <- tibble(
+  czas = seq.Date(from = as.Date("2011-01-01"), by = "month", length.out = length(windPowerMonthlyTs)),
+  oryginalny = as.numeric(windPowerMonthlyTs),
+  odsezonowany = as.numeric(windPowerDeseasonalized)
+) %>%
+  pivot_longer(-czas, names_to = "typ", values_to = "wartość")
+
+plot27 <- ggplot(windPowerDeseasonDf, aes(x = czas, y = wartość, color = typ, linetype = typ)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("oryginalny" = "black", "odsezonowany" = "blue")) +
+  scale_linetype_manual(values = c("oryginalny" = "solid", "odsezonowany" = "dashed")) +
+  labs(
+    title = "Szereg oryginalny vs odsezonowany – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]",
+    color = "Typ",
+    linetype = "Typ"
+  ) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the wind power deseasonalized plot
+ggsave(
+  filename = "sprawozdanie/img/plot27.png",
+  plot = plot27,
+  width = 14, height = 6, dpi = 400
+)
+
+
+# Electricity – deseasonalized
+electricityDecompAdd <- decompose(electricityMonthlyTs, type = "additive")
+electricityDeseasonalized <- electricityMonthlyTs - electricityDecompAdd$seasonal
+
+electricityDeseasonDf <- tibble(
+  czas = seq.Date(from = as.Date("2010-01-01"), by = "month", length.out = length(electricityMonthlyTs)),
+  oryginalny = as.numeric(electricityMonthlyTs),
+  odsezonowany = as.numeric(electricityDeseasonalized)
+) %>%
+  pivot_longer(-czas, names_to = "typ", values_to = "wartość")
+
+plot28 <- ggplot(electricityDeseasonDf, aes(x = czas, y = wartość, color = typ, linetype = typ)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("oryginalny" = "black", "odsezonowany" = "red")) +
+  scale_linetype_manual(values = c("oryginalny" = "solid", "odsezonowany" = "dashed")) +
+  labs(
+    title = "Szereg oryginalny vs odsezonowany – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]",
+    color = "Typ",
+    linetype = "Typ"
+  ) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the electricity deseasonalized plot
+ggsave(
+  filename = "sprawozdanie/img/plot28.png",
+  plot = plot28,
+  width = 14, height = 6, dpi = 400
+)
+```
+
+
+# Trend elimination
+
+```{r}
+# Wind power – Trend elimination
+windPowerDecompAdd <- decompose(windPowerMonthlyTs, type = "additive")
+windPowerDetrended <- windPowerMonthlyTs - windPowerDecompAdd$trend
+
+windPowerDetrendDf <- tibble(
+  czas = seq.Date(from = as.Date("2011-01-01"), by = "month", length.out = length(windPowerMonthlyTs)),
+  oryginalny = as.numeric(windPowerMonthlyTs),
+  bez_trendu = as.numeric(windPowerDetrended)
+) %>%
+  pivot_longer(-czas, names_to = "typ", values_to = "wartość")
+
+plot29 <- ggplot(windPowerDetrendDf, aes(x = czas, y = wartość, color = typ, linetype = typ)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("oryginalny" = "black", "bez_trendu" = "blue")) +
+  scale_linetype_manual(values = c("oryginalny" = "solid", "bez_trendu" = "dashed")) +
+  labs(
+    title = "Szereg oryginalny vs bez trendu – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]",
+    color = "Typ",
+    linetype = "Typ"
+  ) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the wind power detrended plot
+ggsave(
+  filename = "sprawozdanie/img/plot29.png",
+  plot = plot29,
+  width = 14, height = 6, dpi = 400
+)
+
+
+# Electricity – Trend elimination
+electricityDecompAdd <- decompose(electricityMonthlyTs, type = "additive")
+electricityDetrended <- electricityMonthlyTs - electricityDecompAdd$trend
+
+electricityDetrendDf <- tibble(
+  czas = seq.Date(from = as.Date("2010-01-01"), by = "month", length.out = length(electricityMonthlyTs)),
+  oryginalny = as.numeric(electricityMonthlyTs),
+  bez_trendu = as.numeric(electricityDetrended)
+) %>%
+  pivot_longer(-czas, names_to = "typ", values_to = "wartość")
+
+plot30 <- ggplot(electricityDetrendDf, aes(x = czas, y = wartość, color = typ, linetype = typ)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("oryginalny" = "black", "bez_trendu" = "blue")) +
+  scale_linetype_manual(values = c("oryginalny" = "solid", "bez_trendu" = "dashed")) +
+  labs(
+    title = "Szereg oryginalny vs bez trendu – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]",
+    color = "Typ",
+    linetype = "Typ"
+  ) +
+  theme_economist() +
+  theme(axis.line.y = element_line(color = "black", linewidth = 0.6))
+
+# Export the electricity detrended plot
+ggsave(
+  filename = "sprawozdanie/img/plot30.png",
+  plot = plot30,
+  width = 14, height = 6, dpi = 400
+)
+```
+
+
+# Estimation methods
+
+```{r}
+# Wind power - Estimation methods
+
+# Trend and seasonality elimination
+windPowerDecompAdd <- decompose(windPowerMonthlyTs, type = "additive")
+windPowerDeseasonedDetrended <- windPowerMonthlyTs - windPowerDecompAdd$seasonal - windPowerDecompAdd$trend
+windPowerClean <- na.omit(windPowerDeseasonedDetrended)
+
+# Yule-Walker
+windPowerArYule <- ar(windPowerClean, method = "yule-walker")
+print(windPowerArYule)
+
+# MLE
+windPowerArMLE <- ar(windPowerClean, method = "mle")
+print(windPowerArMLE)
+
+# AIC
+windPowerArAIC <- ar(windPowerClean, method = "yule-walker", aic = TRUE)
+print(windPowerArAIC)
+
+
+# Energy production - Estimation methods
+
+# Trend and seasonality elimination
+electricityDecompAdd <- decompose(electricityMonthlyTs, type = "additive")
+electricityDeseasonedDetrended <- electricityMonthlyTs - electricityDecompAdd$seasonal - electricityDecompAdd$trend
+electricityClean <- na.omit(electricityDeseasonedDetrended)
+
+# Yule-Walker
+electricityArYule <- ar(electricityClean, method = "yule-walker")
+print(electricityArYule)
+
+# MLE
+electricityArMLE <- ar(electricityClean, method = "mle")
+print(electricityArMLE)
+
+# AIC
+electricityArAIC <- ar(electricityClean, method = "yule-walker", aic = TRUE)
+print(electricityArAIC)
+```
+
+
+# ARIMA
+
+```{r}
+# Wind power
+
+# Auto ARIMA
+windPowerAutoArima <- auto.arima(windPowerMonthlyTs, seasonal = TRUE)
+summary(windPowerAutoArima)
+
+# AIC ARIMA
+windPowerArimaAIC <- auto.arima(windPowerMonthlyTs,
+                            ic = "aic",
+                            stepwise = FALSE,
+                            approximation = FALSE)
+summary(windPowerArimaAIC )
+
+# AICc ARIMA
+windPowerArimaAICC <- auto.arima(windPowerMonthlyTs,
+                             ic = "aicc",
+                             stepwise = FALSE,
+                             approximation = FALSE)
+summary(windPowerArimaAICC)
+
+# BIC ARIMA
+windPowerArimaBIC <- auto.arima(windPowerMonthlyTs,
+                            ic = "bic",
+                            stepwise = FALSE,
+                            approximation = FALSE)
+summary(windPowerArimaBIC)
+
+
+# Electricity
+
+# AUTO ARIMA
+electricityAutoArima <- auto.arima(electricityMonthlyTs, seasonal = TRUE)
+summary(electricityAutoArima)
+
+# AIC ARIMA
+electricityArimaAIC <- auto.arima(electricityMonthlyTs,
+                                   ic = "aic",
+                                   stepwise = FALSE,
+                                   approximation = FALSE)
+summary(electricityArimaAIC)
+
+# AICc ARIMA
+electricityArimaAICC <- auto.arima(electricityMonthlyTs,
+                                    ic = "aicc",
+                                    stepwise = FALSE,
+                                    approximation = FALSE)
+summary(electricityArimaAICC)
+
+# BIC ARIMA
+electricityArimaBIC <- auto.arima(electricityMonthlyTs,
+                                   ic = "bic",
+                                   stepwise = FALSE,
+                                   approximation = FALSE)
+summary(electricityArimaBIC)
+```
+
+
+# White noise comparison
+
+```{r, echo=FALSE}
+# Wind power
+png("sprawozdanie/img/plot31.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+tsdiag(windPowerAutoArima)
+dev.off()
+
+png("sprawozdanie/img/plot32.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+acf(residuals(windPowerAutoArima), main = "ACF reszt modelu ARIMA")
+dev.off()
+
+
+# Electricity
+png("sprawozdanie/img/plot33.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+tsdiag(electricityAutoArima)
+dev.off()
+
+png("sprawozdanie/img/plot34.png", width = 1600, height = 800, res = 150)
+par(oma = c(0, 0, 4, 0))
+acf(residuals(electricityAutoArima), main = "ACF reszt modelu ARIMA")
+dev.off()
+```
+
+
+# Naive forecasts
+
+```{r}
+# Wind power
+
+# Naive forecast
+windPowerNaive <- naive(windPowerMonthlyTs, h = 12)
+
+plot35 <- autoplot(windPowerNaive) +
+  labs(
+    title = "Prognoza naiwna – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot35.png",
+  plot = plot35,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Seasonal naive forecast
+windPowerSNaive <- snaive(windPowerMonthlyTs, h = 12)
+
+plot36 <- autoplot(windPowerSNaive) +
+  labs(
+    title = "Prognoza sezonowa naiwna – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot36.png",
+  plot = plot36,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Mean forecast
+windPowerMeanF <- meanf(windPowerMonthlyTs, h = 12)
+
+plot37 <- autoplot(windPowerMeanF) +
+  labs(
+    title = "Prognoza na podstawie średniej – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot37.png",
+  plot = plot37,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Random walk with drift
+windPowerRwf <- rwf(windPowerMonthlyTs, h = 12, drift = TRUE)
+
+plot38 <- autoplot(windPowerRwf) +
+  labs(
+    title = "Random Walk with Drift – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot38.png",
+  plot = plot38,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Electricity
+
+# Naive forecast
+electricityNaive <- naive(electricityMonthlyTs, h = 12)
+
+plot39 <- autoplot(electricityNaive) +
+  labs(
+    title = "Prognoza naiwna – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot39.png",
+  plot = plot39,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Seasonal naive forecast
+electricitySNaive <- snaive(electricityMonthlyTs, h = 12)
+
+plot40 <- autoplot(electricitySNaive) +
+  labs(
+    title = "Prognoza sezonowa naiwna – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot40.png",
+  plot = plot40,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Mean forecast
+electricityMeanF <- meanf(electricityMonthlyTs, h = 12)
+
+plot41 <- autoplot(electricityMeanF) +
+  labs(
+    title = "Prognoza na podstawie średniej – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot41.png",
+  plot = plot41,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Random walk with drift
+electricityRwf <- rwf(electricityMonthlyTs, h = 12, drift = TRUE)
+
+plot42 <- autoplot(electricityRwf) +
+  labs(
+    title = "Random Walk with Drift – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot42.png",
+  plot = plot42,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+```
+
+
+# Non-naive forecasting (ARIMA with mean)
+
+```{r}
+# Wind power
+
+windPowerArimaWithMean <- Arima(windPowerMonthlyTs, order = c(1, 0, 1), include.mean = TRUE)
+
+windPowerForecastWithMean <- forecast(windPowerArimaWithMean, h = 12)
+
+plot43 <- autoplot(windPowerForecastWithMean) +
+  labs(
+    title = "Prognoza ARIMA(1,0,1) z niezerową średnią – moc wiatrowa",
+    x = "Czas",
+    y = "Moc [MW]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot43.png",
+  plot = plot43,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+
+
+# Electricity
+
+electricityArimaWithMean <- Arima(electricityMonthlyTs, order = c(1, 0, 1), include.mean = TRUE)
+
+electricityForecastWithMean <- forecast(electricityArimaWithMean, h = 12)
+
+plot44 <- autoplot(electricityForecastWithMean) +
+  labs(
+    title = "Prognoza ARIMA(1,0,1) z niezerową średnią – produkcja energii",
+    x = "Czas",
+    y = "Produkcja [MWh]"
+  ) +
+  theme_economist()
+
+ggsave(
+  "sprawozdanie/img/plot44.png",
+  plot = plot44,
+  width = 12,
+  height = 6,
+  dpi = 300
+)
+```
